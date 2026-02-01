@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Maze Pro - Analyseur de Performance</title>
+    <style>
+        :root {
+            --bg: #0d0d0d;
+            --panel: #161616;
+            --green: #4ade80;
+            --orange: #fb923c;
+            --visited: rgba(74, 222, 128, 0.1);
+        }
+
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: #ccc; margin: 0; display: flex; flex-direction: column; align-items: center; }
+        
+        #nav { background: var(--panel); width: 100%; padding: 15px 0; border-bottom: 2px solid var(--green); text-align: center; position: sticky; top: 0; z-index: 100; }
+
+        .btn-group { display: flex; justify-content: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+        
+        button { padding: 8px 14px; border: 1px solid var(--green); background: transparent; color: var(--green); cursor: pointer; border-radius: 4px; font-weight: bold; transition: 0.2s; }
+        button:hover { background: var(--green); color: black; }
+        button.orange { border-color: var(--orange); color: var(--orange); }
+        button.orange:hover { background: var(--orange); color: black; }
+        button.active { background: #333; }
+
+        .container { display: flex; gap: 30px; margin: 30px auto; padding: 0 20px; }
+
+        /* Grille */
+        #grid { display: grid; background: #222; gap: 1px; border: 2px solid #333; }
+        .cell { width: 24px; height: 24px; background: #000; position: relative; }
+        .cell.wall { background: #2d382d; }
+        .cell.start { background: var(--green); box-shadow: 0 0 10px var(--green); z-index: 5; }
+        .cell.end { background: var(--orange); box-shadow: 0 0 10px var(--orange); z-index: 5; }
+        .cell.visited { background: var(--visited); transition: background 0.3s; }
+        .cell.path::after { content: ''; position: absolute; top: 50%; left: 50%; width: 6px; height: 6px; background: var(--orange); border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 8px var(--orange); }
+
+        /* Table de données */
+        .data-panel { background: var(--panel); padding: 20px; border-radius: 8px; border: 1px solid #333; min-width: 420px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th { color: var(--green); text-align: left; border-bottom: 2px solid #333; padding: 10px; font-size: 0.8rem; }
+        td { padding: 10px; border-bottom: 1px solid #222; font-family: monospace; font-size: 0.85rem; }
+        .best-score { color: var(--green); font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div id="nav">
+    <div class="btn-group">
+        <button onclick="run('bfs')">Lancer BFS</button>
+        <button onclick="run('dijkstra')">Lancer Dijkstra</button>
+        <button onclick="run('astar')">Lancer A*</button>
+        <button class="orange" id="pauseBtn" onclick="togglePause()">Pause</button>
+        <button class="orange" onclick="generateRandom()">Maze Aléatoire</button>
+        <button class="orange" onclick="resetAll()">Vider</button>
+    </div>
+    <div id="status" style="font-size: 0.8rem;">Statut : Prêt</div>
+</div>
+
+<div class="container">
+    <div id="grid"></div>
+
+    <div class="data-panel">
+        <h3 style="margin:0; color: var(--green);">Comparatif (Trié par Temps)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>ALGO</th>
+                    <th>TEMPS (ms) ↓</th>
+                    <th>VISITÉS</th>
+                    <th>PAS</th>
+                </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    const DIM = 20;
+    const gridEl = document.getElementById('grid');
+    let grid = [];
+    let results = [];
+    let isPaused = false;
+    let running = false;
+    let startNode = { r: 1, c: 1 };
+    let endNode = { r: 18, c: 18 };
+
+    // --- LOGIQUE PAUSE ---
+    function checkPause() {
+        return new Promise(resolve => {
+            const check = () => {
+                if (!isPaused) resolve();
+                else setTimeout(check, 100);
+            };
+            check();
+        });
+    }
+
+    function togglePause() {
+        isPaused = !isPaused;
+        document.getElementById('pauseBtn').innerText = isPaused ? "Reprendre" : "Pause";
+        document.getElementById('status').innerText = isPaused ? "Statut : En pause..." : "Statut : En cours";
+    }
+
+    // --- INITIALISATION ---
+    function init() {
+        gridEl.style.gridTemplateColumns = `repeat(${DIM}, 24px)`;
+        gridEl.innerHTML = '';
+        grid = [];
+        for(let r=0; r<DIM; r++){
+            grid[r] = [];
+            for(let c=0; c<DIM; c++){
+                const div = document.createElement('div');
+                div.className = 'cell';
+                div.onmousedown = () => toggleWall(r,c);
+                div.onmouseover = (e) => { if(e.buttons==1) toggleWall(r,c) };
+                gridEl.appendChild(div);
+                grid[r][c] = { r, c, div: div, wall: false, g: Infinity, f: 0, parent: null };
+            }
+        }
+        setEndpoints();
+    }
+
+    function setEndpoints() {
+        grid[startNode.r][startNode.c].wall = false;
+        grid[endNode.r][endNode.c].wall = false;
+        grid[startNode.r][startNode.c].div.className = 'cell start';
+        grid[endNode.r][endNode.c].div.className = 'cell end';
+    }
+
+    function toggleWall(r,c) {
+        if(running) return;
+        grid[r][c].wall = !grid[r][c].wall;
+        grid[r][c].div.classList.toggle('wall');
+    }
+
+    // --- ALGORITHMES ---
+    async function run(mode) {
+        if(running) return;
+        running = true;
+        isPaused = false;
+        clearOldPath();
+        document.getElementById('status').innerText = "Statut : Recherche...";
+
+        let t0 = performance.now();
+        let visitedCount = 0;
+        let open = [ grid[startNode.r][startNode.c] ];
+        grid[startNode.r][startNode.c].g = 0;
+
+        while(open.length > 0) {
+            await checkPause(); // Point d'arrêt pour la pause
+
+            let current;
+            if(mode === 'astar') {
+                open.sort((a,b) => a.f - b.f);
+                current = open.shift();
+            } else {
+                current = open.shift();
+            }
+
+            if(current.r === endNode.r && current.c === endNode.c) {
+                let duration = (performance.now() - t0).toFixed(2);
+                let steps = await drawPath();
+                addResult(mode.toUpperCase(), parseFloat(duration), visitedCount, steps);
+                document.getElementById('status').innerText = "Statut : Terminé";
+                running = false;
+                return;
+            }
+
+            for(let n of getNeighbors(current)) {
+                let gScore = current.g + 1;
+                if(gScore < n.g) {
+                    n.parent = current;
+                    n.g = gScore;
+                    let h = (mode === 'astar') ? Math.abs(n.r-endNode.r)+Math.abs(n.c-endNode.c) : 0;
+                    n.f = n.g + h;
+                    if(!open.includes(n)) {
+                        open.push(n);
+                        if(n.div.className === 'cell') {
+                            n.div.classList.add('visited');
+                            visitedCount++;
+                            await new Promise(r => setTimeout(r, 10));
+                        }
+                    }
+                }
+            }
+        }
+        running = false;
+        alert("Impossible d'atteindre la sortie !");
+    }
+
+    function getNeighbors(n) {
+        let res = [];
+        [[0,1],[1,0],[0,-1],[-1,0]].forEach(([dr, dc]) => {
+            let nr=n.r+dr, nc=n.c+dc;
+            if(nr>=0 && nr<DIM && nc>=0 && nc<DIM && !grid[nr][nc].wall) res.push(grid[nr][nc]);
+        });
+        return res;
+    }
+
+    async function drawPath() {
+        let curr = grid[endNode.r][endNode.c].parent;
+        let c = 0;
+        while(curr && curr.parent) {
+            await checkPause();
+            curr.div.classList.add('path');
+            curr = curr.parent;
+            c++;
+            await new Promise(r => setTimeout(r, 20));
+        }
+        return c + 1;
+    }
+
+    // --- GESTION DU TABLEAU (TRI) ---
+    function addResult(name, time, visited, path) {
+        results.push({ name, time, visited, path });
+        // Tri par temps croissant
+        results.sort((a, b) => a.time - b.time);
+        renderTable();
+    }
+
+    function renderTable() {
+        const tbody = document.getElementById('results-body');
+        tbody.innerHTML = '';
+        results.forEach((res, index) => {
+            const row = tbody.insertRow();
+            if(index === 0) row.className = 'best-score'; // Le plus rapide en vert
+            row.innerHTML = `<td>${res.name}</td><td>${res.time} ms</td><td>${res.visited}</td><td>${res.path}</td>`;
+        });
+    }
+
+    function clearOldPath() {
+        grid.flat().forEach(n => { n.div.classList.remove('visited', 'path'); n.g = Infinity; n.parent = null; });
+    }
+
+    function generateRandom() { init(); grid.flat().forEach(n => { if(Math.random()<0.3) toggleWall(n.r, n.c); }); }
+    function resetAll() { results = []; renderTable(); init(); }
+
+    init();
+</script>
+</body>
+</html>
